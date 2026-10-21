@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -13,12 +14,25 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-# Render orqali xavfsiz token olish
+# Render portini olish
+PORT = int(os.getenv("PORT", 8080))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "123456789")  # Admin ID yoki guruh ID
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "123456789")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+# Soxta veb-server (Render to'xtatib qo'ymasligi uchun)
+async def handle(request):
+    return web.Response(text="Bot ishlamoqda!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
 
 # MENYU BAZASI (BILOL BURGER)
 MENU = {
@@ -170,12 +184,7 @@ async def process_phone(message: types.Message, state: FSMContext):
     await message.answer("Rahmat! Endi buyurtma yetkazib berilishi kerak bo'lgan **jonli joylashuvni** yuboring:", reply_markup=kb)
 
 @dp.message(OrderState.sending_location, F.location)
-async def process_location(message: types.Message, state: FSNContext if 'FSNContext' in globals() else FSMContext, state_name=None):
-    # state argument type adjustment for older python support if needed, using standard FSMContext
-    pass
-
-@dp.message(OrderState.sending_location, F.location)
-async def process_location_real(message: types.Message, state: FSMContext):
+async def process_location(message: types.Message, state: FSMContext):
     data = await state.get_data()
     cart = data.get("cart", {})
     comment = data.get("comment", "Yo'q")
@@ -207,7 +216,7 @@ async def process_location_real(message: types.Message, state: FSMContext):
         f"📞 **Tel:** {phone}\n"
         f"💬 **Izoh:** {comment}\n\n"
         f"🛒 **Tarkib:**\n{cart_text}\n"
-        f"💰 **Jami summa:** {total:,} so'm\n"
+        f"💰 **Jami summa:** {total:,} so me\n"
         f"📍 **Xarita:** https://maps.google.com/maps?q={lat},{lon}"
     )
     
@@ -225,6 +234,7 @@ async def back_to_main(message: types.Message, state: FSMContext):
 
 async def main():
     logging.basicConfig(level=logging.INFO)
+    await start_web_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
