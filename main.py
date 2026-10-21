@@ -34,7 +34,7 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-# ANIQ MENYU BAZASI (RASMDAGI BARCHA MAHSULOTLAR VA NARXLAR)
+# MENYU BAZASI
 MENU = {
     "🌯 Lavash (Go'shtli)": {
         "Lavash extra": 38000,
@@ -99,15 +99,18 @@ MENU = {
 
 class OrderState(StatesGroup):
     choosing_category = State()
-    choosing_item = State()
     writing_comment = State()
-    sending_phone = State()
     sending_location = State()
+    sending_phone = State()
+    confirming_order = State()
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    cart = data.get("cart", {}) # Savatchani saqlab qolamiz
     await state.clear()
-    await state.update_data(cart={})
+    await state.update_data(cart=cart)
+    
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🍔 Menyu"), KeyboardButton(text="🛒 Savatcha")],
@@ -121,6 +124,19 @@ async def cmd_start(message: types.Message, state: FSMContext):
         reply_markup=kb,
         parse_mode="Markdown"
     )
+
+@dp.message(F.text == "⬅️ Asosiy menyu")
+async def back_to_main(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    cart = data.get("cart", {})
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🍔 Menyu"), KeyboardButton(text="🛒 Savatcha")],
+            [KeyboardButton(text="📞 Aloqa / Biz haqimizda")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("Asosiy menyudasiz:", reply_markup=kb)
 
 @dp.message(F.text == "🍔 Menyu")
 async def show_categories(message: types.Message, state: FSMContext):
@@ -171,45 +187,101 @@ async def show_cart(message: types.Message, state: FSMContext):
     
     text += f"\n💰 **Jami summa:** {total:,} so'm"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Buyurtmani tasdiqlash", callback_data="checkout")],
+        [InlineKeyboardButton(text="✅ Buyurtmani rasmiylashtirish", callback_data="checkout")],
         [InlineKeyboardButton(text="🗑 Savatni tozalash", callback_data="clear_cart")]
     ])
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "clear_cart")
 async def clear_cart(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(cart={})
+    data = await state.get_data()
+    data["cart"] = {}
+    await state.update_data(data)
     await callback.message.edit_text("🗑 Savatchangiz tozalandi.")
 
+# 1. IZOH SO'RASH
 @dp.callback_query(F.data == "checkout")
 async def checkout_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(OrderState.writing_comment)
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Izoh yo'q")]], resize_keyboard=True)
-    await callback.message.answer("Buyurtmaga qo'shimcha izohingiz bormi? (Masalan: *Piyozsiz bo'lsin, sous ko'proq*):", reply_markup=kb, parse_mode="Markdown")
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Yo'q ❌")]], resize_keyboard=True)
+    await callback.message.answer("Buyurtmaga qo'shimcha izohingiz bormi? (Masalan: *Piyozsiz bo'lsin*):", reply_markup=kb, parse_mode="Markdown")
 
 @dp.message(OrderState.writing_comment)
 async def process_comment(message: types.Message, state: FSMContext):
-    comment = message.text if message.text != "Izoh yo'q" else "Mavjud emas"
+    comment = message.text if message.text != "Yo'q ❌" else "Mavjud emas"
     await state.update_data(comment=comment)
-    await state.set_state(OrderState.sending_phone)
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]], resize_keyboard=True)
-    await message.answer("Iltimos, siz bilan bog'lanishimiz uchun **telefon raqamingizni** yuboring:", reply_markup=kb, parse_mode="Markdown")
-
-@dp.message(OrderState.sending_phone, F.contact)
-async def process_phone(message: types.Message, state: FSMContext):
-    await state.update_data(phone=message.contact.phone_number)
     await state.set_state(OrderState.sending_location)
+    
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📍 Joylashuvni yuborish", request_location=True)]], resize_keyboard=True)
-    await message.answer("Rahmat! Endi buyurtmani yetkazib berishimiz uchun **jonli joylashuv (lokatsiya)** yuboring:", reply_markup=kb, parse_mode="Markdown")
+    await message.answer("Rahmat! Endi yetkazib berish manzilini (**lokatsiya**) yuboring (xaritadan tanlab ham yuborishingiz mumkin):", reply_markup=kb, parse_mode="Markdown")
 
+# 2. LOKATSIYA QABUL QILISH
 @dp.message(OrderState.sending_location, F.location)
 async def process_location(message: types.Message, state: FSMContext):
+    await state.update_data(lat=message.location.latitude, lon=message.location.longitude)
+    await state.set_state(OrderState.sending_phone)
+    
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]], resize_keyboard=True)
+    await message.answer("Zo'r! Endi biz bilan bog'lanish uchun **telefon raqamingizni** yuboring:", reply_markup=kb, parse_mode="Markdown")
+
+# 3. TELEFON RAQAM QABUL QILISH VA TASDIQLASHGA TAYYORLash
+@dp.message(OrderState.sending_phone, F.contact)
+async def process_phone(message: types.Message, state: FSMContext):
+    phone = message.contact.phone_number
+    await state.update_data(phone=phone)
+    
     data = await state.get_data()
     cart = data.get("cart", {})
-    comment = data.get("comment", "Yo'q")
+    comment = data.get("comment", "Mavjud emas")
+    
+    total = 0
+    cart_text = ""
+    for item, qty in cart.items():
+        price = 0
+        for cat in MENU.values():
+            if item in cat:
+                price = cat[item]
+                break
+        summa = price * qty
+        total += summa
+        cart_text += f"• {item} x {qty} ta = {summa:,} so'm\n"
+        
+    summary_text = (
+        f"📋 **Buyurtma ma'lumotlari:**\n\n"
+        f"{cart_text}\n"
+        f"💰 **Jami summa:** {total:,} so'm\n"
+        f"💬 **Izoh:** {comment}\n"
+        f"📞 **Telefon:** {phone}\n"
+        f"📍 **Manzil:** Lokatsiya biriktirildi\n\n"
+        f"Barcha ma'lumotlar to'g'ri bo'lsa, pastdagi tugmani bosing:"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Buyurtma berish", callback_data="confirm_final_order")],
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_order")]
+    ])
+    
+    await state.set_state(OrderState.confirming_order)
+    # Keyboardni tozalash uchun asosiy menyu klaviaturasini chiqaramiz
+    main_kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🍔 Menyu"), KeyboardButton(text="🛒 Savatcha")],
+            [KeyboardButton(text="📞 Aloqa / Biz haqimizda")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer(summary_text, reply_markup=main_kb, parse_mode="Markdown")
+    await message.answer("Tasdiqlash uchun quyidagi tugmani bosing:", reply_markup=kb)
+
+# 4. YAKUNIY BUYURTMANI TASDIQLASH
+@dp.callback_query(OrderState.confirming_order, F.data == "confirm_final_order")
+async def confirm_order(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    cart = data.get("cart", {})
+    comment = data.get("comment", "Mavjud emas")
     phone = data.get("phone", "Noma'lum")
-    lat = message.location.latitude
-    lon = message.location.longitude
+    lat = data.get("lat")
+    lon = data.get("lon")
     
     total = 0
     cart_text = ""
@@ -223,18 +295,11 @@ async def process_location(message: types.Message, state: FSMContext):
         total += summa
         cart_text += f" - {item} x {qty} ta = {summa:,} so'm\n"
         
-    main_kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🍔 Menyu"), KeyboardButton(text="🛒 Savatcha")],
-            [KeyboardButton(text="📞 Aloqa / Biz haqimizda")]
-        ],
-        resize_keyboard=True
-    )
-    await message.answer("🎉 **Buyurtmangiz muvaffaqiyatli qabul qilindi!**\nTez orada operatorimiz siz bilan bog'lanadi va yetkazib beriladi.", reply_markup=main_kb, parse_mode="Markdown")
+    await callback.message.edit_text("🎉 **Buyurtmangiz muvaffaqiyatli qabul qilindi!**\nTez orada operatorimiz siz bilan bog'lanadi.", parse_mode="Markdown")
     
     admin_message = (
         f"🔔 **YANGI BUYURTMA! (BILOL BURGER)**\n\n"
-        f"👤 **Mijoz:** {message.from_user.full_name}\n"
+        f"👤 **Mijoz:** {callback.from_user.full_name}\n"
         f"📞 **Tel:** {phone}\n"
         f"💬 **Izoh:** {comment}\n\n"
         f"🛒 **Tarkibi:**\n{cart_text}\n"
@@ -246,17 +311,24 @@ async def process_location(message: types.Message, state: FSMContext):
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_message, parse_mode="Markdown")
         await bot.send_location(chat_id=ADMIN_CHAT_ID, latitude=lat, longitude=lon)
     except Exception as e:
-        logging.error(f"Adminga xabar yuborishda xatolik: {e}")
+        logging.error(f"Adminga yuborishda xatolik: {e}")
         
     await state.clear()
 
+@dp.callback_query(F.data == "cancel_order")
+async def cancel_order(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Buyurtma bekor qilindi.")
+
 @dp.message(F.text == "📞 Aloqa / Biz haqimizda")
 async def show_about(message: types.Message):
-    await message.answer("🍔 **BILOL BURGER**\n\nFast-food taomlarini issiq va tezkor yetkazib berish xizmati!\n\n📞 Tel: +998XX-XXX-XX-XX\n📍 Manzil: Markaziy filial")
-
-@dp.message(F.text == "⬅️ Asosiy menyu")
-async def back_to_main(message: types.Message, state: FSMContext):
-    await cmd_start(message, state)
+    await message.answer(
+        "🍔 **BILOL BURGER**\n\n"
+        "Fast-food taomlarini issiq va tezkor yetkazib berish xizmati!\n\n"
+        "📞 Tel: +99917892122\n"
+        "📍 Manzil: Markaziy filial",
+        parse_mode="Markdown"
+    )
 
 async def main():
     logging.basicConfig(level=logging.INFO)
