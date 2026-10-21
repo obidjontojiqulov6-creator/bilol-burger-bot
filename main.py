@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
@@ -18,11 +19,13 @@ from aiogram.types import (
 PORT = int(os.getenv("PORT", 8080))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "123456789")
+# Render taqdim etgan domen havolangiz (Masalan: https://bilol-burger-bot.onrender.com)
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Soxta veb-server (Render Timed Out bermasligi uchun)
+# Soxta veb-server (Render uchun)
 async def handle(request):
     return web.Response(text="Bilol Burger Bot ishlamoqda!")
 
@@ -34,7 +37,21 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-# MENYU BAZASI
+# BOTNI UYQUGA KETKAZMASLIK UCHUN PING FUNKSIYASI (KEEP-ALIVE)
+async def keep_alive():
+    """Server o'chib qolmasligi uchun har 10 daqiqada o'ziga so'rov yuboradi"""
+    await asyncio.sleep(10)  # Server to'liq ishga tushib olishini kutish
+    while True:
+        if RENDER_EXTERNAL_URL:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(RENDER_EXTERNAL_URL) as resp:
+                        logging.info(f"Ping yuborildi: status {resp.status}")
+            except Exception as e:
+                logging.error(f"Ping yuborishda xatolik: {e}")
+        await asyncio.sleep(600)  # Har 10 daqiqada qaytariladi (600 soniya)
+
+# ANIQ MENYU BAZASI
 MENU = {
     "🌯 Lavash (Go'shtli)": {
         "Lavash extra": 38000,
@@ -107,7 +124,7 @@ class OrderState(StatesGroup):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    cart = data.get("cart", {}) # Savatchani saqlab qolamiz
+    cart = data.get("cart", {})
     await state.clear()
     await state.update_data(cart=cart)
     
@@ -127,8 +144,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "⬅️ Asosiy menyu")
 async def back_to_main(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    cart = data.get("cart", {})
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🍔 Menyu"), KeyboardButton(text="🛒 Savatcha")],
@@ -194,9 +209,7 @@ async def show_cart(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "clear_cart")
 async def clear_cart(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    data["cart"] = {}
-    await state.update_data(data)
+    await state.update_data(cart={})
     await callback.message.edit_text("🗑 Savatchangiz tozalandi.")
 
 # 1. IZOH SO'RASH
@@ -222,9 +235,9 @@ async def process_location(message: types.Message, state: FSMContext):
     await state.set_state(OrderState.sending_phone)
     
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]], resize_keyboard=True)
-    await message.answer("Zo'r! Endi biz bilan bog'lanish uchun **telefon raqamingizni** yuboring:", reply_markup=kb, parse_mode="Markdown")
+    await message.answer("Zo'r! Endi siz bilan bog'lanishimiz uchun **telefon raqamingizni** yuboring:", reply_markup=kb, parse_mode="Markdown")
 
-# 3. TELEFON RAQAM QABUL QILISH VA TASDIQLASHGA TAYYORLash
+# 3. TELEFON RAQAM QABUL QILISH VA YAKUNIY KO'RINISH
 @dp.message(OrderState.sending_phone, F.contact)
 async def process_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number
@@ -244,7 +257,7 @@ async def process_phone(message: types.Message, state: FSMContext):
                 break
         summa = price * qty
         total += summa
-        cart_text += f"• {item} x {qty} ta = {summa:,} so'm\n"
+        cart_text += f"• **{item}** x {qty} ta = {summa:,} so'm\n"
         
     summary_text = (
         f"📋 **Buyurtma ma'lumotlari:**\n\n"
@@ -253,7 +266,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         f"💬 **Izoh:** {comment}\n"
         f"📞 **Telefon:** {phone}\n"
         f"📍 **Manzil:** Lokatsiya biriktirildi\n\n"
-        f"Barcha ma'lumotlar to'g'ri bo'lsa, pastdagi tugmani bosing:"
+        f"Barcha ma'lumotlar to'g me'ri bo'lsa, pastdagi tugmani bosing:"
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -262,7 +275,6 @@ async def process_phone(message: types.Message, state: FSMContext):
     ])
     
     await state.set_state(OrderState.confirming_order)
-    # Keyboardni tozalash uchun asosiy menyu klaviaturasini chiqaramiz
     main_kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🍔 Menyu"), KeyboardButton(text="🛒 Savatcha")],
@@ -273,7 +285,7 @@ async def process_phone(message: types.Message, state: FSMContext):
     await message.answer(summary_text, reply_markup=main_kb, parse_mode="Markdown")
     await message.answer("Tasdiqlash uchun quyidagi tugmani bosing:", reply_markup=kb)
 
-# 4. YAKUNIY BUYURTMANI TASDIQLASH
+# 4. YAKUNIY BUYURTMANI ADMINGA YUBORISH
 @dp.callback_query(OrderState.confirming_order, F.data == "confirm_final_order")
 async def confirm_order(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -333,6 +345,8 @@ async def show_about(message: types.Message):
 async def main():
     logging.basicConfig(level=logging.INFO)
     await start_web_server()
+    # Uyqu rejimiga tushmasligi uchun fonda ping funksiyasini yurgazish
+    asyncio.create_task(keep_alive())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
