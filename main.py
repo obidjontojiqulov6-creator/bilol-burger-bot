@@ -19,7 +19,6 @@ from aiogram.types import (
 PORT = int(os.getenv("PORT", 8080))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "123456789")
-# Render taqdim etgan domen havolangiz (Masalan: https://bilol-burger-bot.onrender.com)
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
 bot = Bot(token=BOT_TOKEN)
@@ -37,19 +36,18 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-# BOTNI UYQUGA KETKAZMASLIK UCHUN PING FUNKSIYASI (KEEP-ALIVE)
+# Uyqu rejimiga tushirmaslik uchun ping
 async def keep_alive():
-    """Server o'chib qolmasligi uchun har 10 daqiqada o'ziga so'rov yuboradi"""
-    await asyncio.sleep(10)  # Server to'liq ishga tushib olishini kutish
+    await asyncio.sleep(10)
     while True:
         if RENDER_EXTERNAL_URL:
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(RENDER_EXTERNAL_URL) as resp:
-                        logging.info(f"Ping yuborildi: status {resp.status}")
+                        logging.info(f"Ping status: {resp.status}")
             except Exception as e:
-                logging.error(f"Ping yuborishda xatolik: {e}")
-        await asyncio.sleep(600)  # Har 10 daqiqada qaytariladi (600 soniya)
+                logging.error(f"Ping xatolik: {e}")
+        await asyncio.sleep(600)
 
 # ANIQ MENYU BAZASI
 MENU = {
@@ -121,6 +119,16 @@ class OrderState(StatesGroup):
     sending_phone = State()
     confirming_order = State()
 
+# Tugmalar klaviaturasini yasash (sanoq bilan)
+def build_items_keyboard(category, cart):
+    items = MENU[category]
+    inline_kb = []
+    for item_name, price in items.items():
+        qty = cart.get(item_name, 0)
+        btn_text = f"{item_name} ({qty} ta) — {price:,} so'm" if qty > 0 else f"{item_name} — {price:,} so'm"
+        inline_kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"add_{item_name}")])
+    return InlineKeyboardMarkup(inline_keyboard=inline_kb)
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -164,11 +172,11 @@ async def show_categories(message: types.Message, state: FSMContext):
 @dp.message(OrderState.choosing_category, F.text.in_(MENU.keys()))
 async def show_items(message: types.Message, state: FSMContext):
     category = message.text
-    items = MENU[category]
-    inline_kb = []
-    for item_name, price in items.items():
-        inline_kb.append([InlineKeyboardButton(text=f"{item_name} — {price:,} so'm", callback_data=f"add_{item_name}")])
-    kb = InlineKeyboardMarkup(inline_keyboard=inline_kb)
+    await state.update_data(current_category=category)
+    data = await state.get_data()
+    cart = data.get("cart", {})
+    
+    kb = build_items_keyboard(category, cart)
     await message.answer(f"**{category}** bo'limi:\n\nSavatga qo'shish uchun taomni bosing:", reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("add_"))
@@ -176,9 +184,20 @@ async def add_to_cart(callback: types.CallbackQuery, state: FSMContext):
     item_name = callback.data.split("add_")[1]
     data = await state.get_data()
     cart = data.get("cart", {})
+    current_category = data.get("current_category")
+    
     cart[item_name] = cart.get(item_name, 0) + 1
     await state.update_data(cart=cart)
-    await callback.answer(f"✅ {item_name} savatchaga qo'shildi!")
+    
+    # Tugma sanoq bilan yangilanadi
+    if current_category:
+        new_kb = build_items_keyboard(current_category, cart)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=new_kb)
+        except Exception:
+            pass
+
+    await callback.answer(f"✅ {item_name} ({cart[item_name]} ta) savatda!")
 
 @dp.message(F.text == "🛒 Savatcha")
 async def show_cart(message: types.Message, state: FSMContext):
@@ -237,7 +256,7 @@ async def process_location(message: types.Message, state: FSMContext):
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]], resize_keyboard=True)
     await message.answer("Zo'r! Endi siz bilan bog'lanishimiz uchun **telefon raqamingizni** yuboring:", reply_markup=kb, parse_mode="Markdown")
 
-# 3. TELEFON RAQAM QABUL QILISH VA YAKUNIY KO'RINISH
+# 3. TELEFON RAQAM VA TASDIQLASH
 @dp.message(OrderState.sending_phone, F.contact)
 async def process_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number
@@ -266,7 +285,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         f"💬 **Izoh:** {comment}\n"
         f"📞 **Telefon:** {phone}\n"
         f"📍 **Manzil:** Lokatsiya biriktirildi\n\n"
-        f"Barcha ma'lumotlar to'g me'ri bo'lsa, pastdagi tugmani bosing:"
+        f"Barcha ma'lumotlar to'g'ri bo'lsa, pastdagi tugmani bosing:"
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -285,7 +304,7 @@ async def process_phone(message: types.Message, state: FSMContext):
     await message.answer(summary_text, reply_markup=main_kb, parse_mode="Markdown")
     await message.answer("Tasdiqlash uchun quyidagi tugmani bosing:", reply_markup=kb)
 
-# 4. YAKUNIY BUYURTMANI ADMINGA YUBORISH
+# 4. YAKUNIY BUYURTMA
 @dp.callback_query(OrderState.confirming_order, F.data == "confirm_final_order")
 async def confirm_order(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -345,7 +364,6 @@ async def show_about(message: types.Message):
 async def main():
     logging.basicConfig(level=logging.INFO)
     await start_web_server()
-    # Uyqu rejimiga tushmasligi uchun fonda ping funksiyasini yurgazish
     asyncio.create_task(keep_alive())
     await dp.start_polling(bot)
 
