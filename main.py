@@ -119,14 +119,20 @@ class OrderState(StatesGroup):
     sending_phone = State()
     confirming_order = State()
 
-# Tugmalar klaviaturasini yasash (sanoq bilan)
+# PLUS va MINUS TUGMALARI BILAN KLAVIATURA YASASH
 def build_items_keyboard(category, cart):
     items = MENU[category]
     inline_kb = []
     for item_name, price in items.items():
         qty = cart.get(item_name, 0)
-        btn_text = f"{item_name} ({qty} ta) — {price:,} so'm" if qty > 0 else f"{item_name} — {price:,} so'm"
-        inline_kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"add_{item_name}")])
+        row = []
+        if qty > 0:
+            # Agar tanlangan bo'lsa, chap tarafida minus tugmasi paydo bo'ladi
+            row.append(InlineKeyboardButton(text="➖ 1 ta", callback_data=f"remove_{item_name}"))
+            row.append(InlineKeyboardButton(text=f"➕ {item_name} ({qty} ta) — {price:,} so'm", callback_data=f"add_{item_name}"))
+        else:
+            row.append(InlineKeyboardButton(text=f"{item_name} — {price:,} so'm", callback_data=f"add_{item_name}"))
+        inline_kb.append(row)
     return InlineKeyboardMarkup(inline_keyboard=inline_kb)
 
 @dp.message(CommandStart())
@@ -177,8 +183,9 @@ async def show_items(message: types.Message, state: FSMContext):
     cart = data.get("cart", {})
     
     kb = build_items_keyboard(category, cart)
-    await message.answer(f"**{category}** bo'limi:\n\nSavatga qo'shish uchun taomni bosing:", reply_markup=kb, parse_mode="Markdown")
+    await message.answer(f"**{category}** bo'limi:\n\nSavatga qo'shish yoki kamaytirish uchun tugmalarni bosing:", reply_markup=kb, parse_mode="Markdown")
 
+# TAOM QO'SHISH (PLUS)
 @dp.callback_query(F.data.startswith("add_"))
 async def add_to_cart(callback: types.CallbackQuery, state: FSMContext):
     item_name = callback.data.split("add_")[1]
@@ -189,7 +196,6 @@ async def add_to_cart(callback: types.CallbackQuery, state: FSMContext):
     cart[item_name] = cart.get(item_name, 0) + 1
     await state.update_data(cart=cart)
     
-    # Tugma sanoq bilan yangilanadi
     if current_category:
         new_kb = build_items_keyboard(current_category, cart)
         try:
@@ -197,7 +203,31 @@ async def add_to_cart(callback: types.CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
-    await callback.answer(f"✅ {item_name} ({cart[item_name]} ta) savatda!")
+    await callback.answer(f"➕ {item_name} ({cart[item_name]} ta)")
+
+# TAOMNI KAMAYTIRISH (MINUS)
+@dp.callback_query(F.data.startswith("remove_"))
+async def remove_from_cart(callback: types.CallbackQuery, state: FSMContext):
+    item_name = callback.data.split("remove_")[1]
+    data = await state.get_data()
+    cart = data.get("cart", {})
+    current_category = data.get("current_category")
+    
+    if item_name in cart and cart[item_name] > 0:
+        cart[item_name] -= 1
+        if cart[item_name] == 0:
+            del cart[item_name]
+            
+    await state.update_data(cart=cart)
+    
+    if current_category:
+        new_kb = build_items_keyboard(current_category, cart)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=new_kb)
+        except Exception:
+            pass
+
+    await callback.answer(f"➖ 1 ta kamaytirildi")
 
 @dp.message(F.text == "🛒 Savatcha")
 async def show_cart(message: types.Message, state: FSMContext):
